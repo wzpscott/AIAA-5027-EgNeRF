@@ -1,0 +1,6 @@
+*.egg-info
+*.sh
+outputs/
+egnerf/data
+egnerf/raw-data
+egnerf/__pycache__
