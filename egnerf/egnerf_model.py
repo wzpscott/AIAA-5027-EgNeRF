@@ -25,9 +25,9 @@ from nerfstudio.model_components.losses import (
 @dataclass
 class EgNeRFModelConfig(NerfactoModelConfig):
     _target: Type = field(default_factory=lambda: EgNeRFModel)
-    rgb_loss_mult: float = 1.0
+    rgb_loss_mult: float = 0.0
     event_loss_mult: float = 1.0
-    event_threshold: float = 0.1
+    event_threshold: float = 0.4
     
 class EgNeRFModel(NerfactoModel):
     config: EgNeRFModelConfig
@@ -60,6 +60,7 @@ class EgNeRFModel(NerfactoModel):
         elif mode == 'eval':
             outputs = {
                 "rgb": rgb,
+                # "rgb_prev": rgb_prev,
                 "accumulation": accumulation,
                 "depth": depth,
             }
@@ -109,3 +110,41 @@ class EgNeRFModel(NerfactoModel):
 
         return loss_dict
     
+    def forward(self, ray_bundle: RayBundle, mode='train') -> Dict[str, torch.Tensor]:
+        """Run forward starting with a ray bundle. This outputs different things depending on the configuration
+        of the model and whether or not the batch is provided (whether or not we are training basically)
+
+        Args:
+            ray_bundle: containing all the information needed to render that ray latents included
+        """
+
+        if self.collider is not None:
+            ray_bundle = self.collider(ray_bundle)
+
+        return self.get_outputs(ray_bundle, mode=mode)
+    
+    @torch.no_grad()
+    def get_outputs_for_camera_ray_bundle(self, camera_ray_bundle: RayBundle) -> Dict[str, torch.Tensor]:
+        """Takes in camera parameters and computes the output of the model.
+
+        Args:
+            camera_ray_bundle: ray bundle to calculate outputs over
+        """
+        num_rays_per_chunk = self.config.eval_num_rays_per_chunk
+        image_height, image_width = camera_ray_bundle.origins.shape[:2]
+        num_rays = len(camera_ray_bundle)
+        outputs_lists = defaultdict(list)
+        for i in range(0, num_rays, num_rays_per_chunk):
+            start_idx = i
+            end_idx = i + num_rays_per_chunk
+            ray_bundle = camera_ray_bundle.get_row_major_sliced_ray_bundle(start_idx, end_idx)
+            outputs = self.forward(ray_bundle=ray_bundle, mode='eval')
+            for output_name, output in outputs.items():  # type: ignore
+                if not torch.is_tensor(output):
+                    # TODO: handle lists of tensors as well
+                    continue
+                outputs_lists[output_name].append(output)
+        outputs = {}
+        for output_name, outputs_list in outputs_lists.items():
+            outputs[output_name] = torch.cat(outputs_list).view(image_height, image_width, -1)  # type: ignore
+        return outputs

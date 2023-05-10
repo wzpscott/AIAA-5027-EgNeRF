@@ -27,6 +27,11 @@ from nerfstudio.data.pixel_samplers import (
     PatchPixelSampler,
     PixelSampler,
 )
+from nerfstudio.data.utils.dataloaders import (
+    CacheDataloader,
+    FixedIndicesEvalDataloader,
+    RandIndicesEvalDataloader,
+)
 
 class InputDataset(BaseInputDataset):
     """Dataset that returns images AND EVENT FRAMES.
@@ -36,8 +41,9 @@ class InputDataset(BaseInputDataset):
         scale_factor: The scaling factor for the dataparser outputs
     """
 
-    def __init__(self, dataparser_outputs: DataparserOutputs, scale_factor: float = 1.0):
+    def __init__(self, dataparser_outputs: DataparserOutputs, scale_factor: float = 1.0, split='train'):
         super().__init__(dataparser_outputs, scale_factor)
+        self.split = split
         
     def get_data(self, image_idx: int) -> Dict:
         """Returns the ImageDataset data as a dictionary.
@@ -49,8 +55,12 @@ class InputDataset(BaseInputDataset):
         data = {"image_idx": image_idx}
         data["image"] = image
         
-        event_frame = self.get_event_frame(image_idx)
-        data['event_frame'] = event_frame
+        if self.split == 'train':
+            event_frame = self.get_event_frame(image_idx)
+            data['event_frame'] = event_frame
+        else:
+            data['event_frame'] = torch.zeros_like(image)
+            
         if self.has_masks:
             mask_filepath = self._dataparser_outputs.mask_filenames[image_idx]
             data["mask"] = get_image_mask_tensor_from_path(filepath=mask_filepath, scale_factor=self.scale_factor)
@@ -104,7 +114,41 @@ class EgNeRFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
         super().__init__(
             config=config, device=device, test_mode=test_mode, world_size=world_size, local_rank=local_rank, **kwargs
         )
-    
+        
+    def setup_eval(self):
+        """Sets up the data loader for evaluation"""
+        assert self.eval_dataset is not None
+        CONSOLE.print("Setting up evaluation dataset...")
+        self.eval_image_dataloader = CacheDataloader(
+            self.eval_dataset,
+            num_images_to_sample_from=self.config.eval_num_images_to_sample_from,
+            num_times_to_repeat_images=self.config.eval_num_times_to_repeat_images,
+            device=self.device,
+            num_workers=self.world_size * 4,
+            pin_memory=True,
+            collate_fn=self.config.collate_fn,
+        )
+        self.iter_eval_image_dataloader = iter(self.eval_image_dataloader)
+        self.eval_pixel_sampler = self._get_pixel_sampler(self.eval_dataset, self.config.eval_num_rays_per_batch)
+        self.eval_camera_optimizer = self.config.camera_optimizer.setup(
+            num_cameras=self.eval_dataset.cameras.size, device=self.device
+        )
+        self.eval_ray_generator = RayGenerator(
+            self.eval_dataset.cameras.to(self.device),
+            self.eval_camera_optimizer,
+        )
+        # for loading full images
+        self.fixed_indices_eval_dataloader = FixedIndicesEvalDataloader(
+            input_dataset=self.eval_dataset,
+            device=self.device,
+            num_workers=self.world_size * 4,
+        )
+        self.eval_dataloader = RandIndicesEvalDataloader(
+            input_dataset=self.eval_dataset,
+            device=self.device,
+            num_workers=self.world_size * 4,
+        )
+        
     def create_train_dataset(self) -> InputDataset:
         """Sets up the data loaders for training"""
         return InputDataset(
@@ -115,8 +159,9 @@ class EgNeRFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
     def create_eval_dataset(self) -> InputDataset:
         """Sets up the data loaders for evaluation"""
         return InputDataset(
-            dataparser_outputs=self.train_dataparser_outputs,
+            dataparser_outputs=self.dataparser.get_dataparser_outputs(split=self.test_split),
             scale_factor=self.config.camera_res_scale_factor,
+            split='val'
         )
         
     def next_train(self, step: int) -> Tuple[RayBundle, Dict]:
@@ -132,5 +177,26 @@ class EgNeRFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
         ray_indices_all = torch.cat([ray_indices_prev, ray_indices], dim=0)
         ray_bundle = self.train_ray_generator(ray_indices_all)
         return ray_bundle, batch
+    
+    def next_eval(self, step: int) -> Tuple[RayBundle, Dict]:
+        """Returns the next batch of data from the eval dataloader."""
+        self.eval_count += 1
+        image_batch = next(self.iter_eval_image_dataloader)
+        assert self.eval_pixel_sampler is not None
+        batch = self.eval_pixel_sampler.sample(image_batch)
+        ray_indices = batch["indices"]
+        ray_bundle = self.eval_ray_generator(ray_indices)
+        ray_indices_prev = batch["indices"].clone()
+        ray_indices_prev[0] = torch.max(ray_indices_prev[0], ray_indices_prev[0]-1)
+        ray_indices_all = torch.cat([ray_indices_prev, ray_indices], dim=0)
+        ray_bundle = self.eval_ray_generator(ray_indices_all)
+        return ray_bundle, batch
+
+    def next_eval_image(self, step: int) -> Tuple[int, RayBundle, Dict]:
+        for camera_ray_bundle, batch in self.eval_dataloader:
+            assert camera_ray_bundle.camera_indices is not None
+            image_idx = int(camera_ray_bundle.camera_indices[0, 0, 0])
+            return image_idx, camera_ray_bundle, batch
+        raise ValueError("No more eval images")
 
         

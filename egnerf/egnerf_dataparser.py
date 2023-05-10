@@ -262,7 +262,10 @@ class EgNeRF(DataParser):
         image_filenames = _find_files(f"{split_dir}/rgb", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"])
         
         # --- event frames ---
-        event_filenames = _find_files(f"{split_dir}/event-frame", exts=["*.npy"])
+        if split == 'train':
+            event_filenames = _find_files(f"{split_dir}/event-frame", exts=["*.npy"])
+        else:
+            event_filenames = None
         
         # --- masks ---
         mask_filenames = []
@@ -271,7 +274,6 @@ class EgNeRF(DataParser):
         
         dataparser_outputs = DataparserOutputs(
             image_filenames=image_filenames,
-            # event_filenames=event_filenames,
             metadata={'event_filenames': event_filenames},
             cameras=cameras,
             scene_box=scene_box,
