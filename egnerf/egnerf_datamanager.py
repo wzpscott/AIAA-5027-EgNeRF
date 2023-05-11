@@ -44,6 +44,12 @@ class InputDataset(BaseInputDataset):
     def __init__(self, dataparser_outputs: DataparserOutputs, scale_factor: float = 1.0, split='train'):
         super().__init__(dataparser_outputs, scale_factor)
         self.split = split
+        self.H, self.W = 260, 346
+        self.color_mask = torch.zeros(self.H, self.W, 3)
+        self.color_mask[0::2, 0::2, 0] = 1  # r
+        self.color_mask[0::2, 1::2, 1] = 1  # g
+        self.color_mask[1::2, 0::2, 1] = 1  # g
+        self.color_mask[1::2, 1::2, 2] = 1  # b
         
     def get_data(self, image_idx: int) -> Dict:
         """Returns the ImageDataset data as a dictionary.
@@ -60,6 +66,7 @@ class InputDataset(BaseInputDataset):
             data['event_frame'] = event_frame
         else:
             data['event_frame'] = torch.zeros_like(image)
+        data['color_mask'] = self.color_mask
             
         if self.has_masks:
             mask_filepath = self._dataparser_outputs.mask_filenames[image_idx]
@@ -75,6 +82,8 @@ class InputDataset(BaseInputDataset):
         event_filename = self._dataparser_outputs.metadata['event_filenames'][image_idx]
         event_frame = np.load(event_filename).astype("float32")
         event_frame = torch.from_numpy(event_frame)
+        event_frame = torch.repeat_interleave(event_frame, 3, dim=-1)
+        # event_frame *= self.color_mask
         return event_frame
 
 @dataclass
@@ -173,9 +182,11 @@ class EgNeRFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
         
         ray_indices = batch["indices"]
         ray_indices_prev = batch["indices"].clone()
-        ray_indices_prev[0] = torch.max(ray_indices_prev[0], ray_indices_prev[0]-1)
+        ray_indices_prev[:, 0][ray_indices_prev[:, 0]==0] = 1
+        ray_indices_prev[:, 0] -= 1
         ray_indices_all = torch.cat([ray_indices_prev, ray_indices], dim=0)
         ray_bundle = self.train_ray_generator(ray_indices_all)
+        batch["indices"] = ray_indices_all
         return ray_bundle, batch
     
     def next_eval(self, step: int) -> Tuple[RayBundle, Dict]:

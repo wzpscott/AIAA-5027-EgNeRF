@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import os
 import os.path as path
 import sys
-sys.path.append('/home/zipengwang/workspace/1-AIAA5027-G5/0-EgNeRF')
+sys.path.append('/home/zipengwang/workspace/1-AIAA5027-G5/0-EgNeRF/egnerf')
 
 import tyro
 import imageio.v2 as imageio
@@ -29,8 +29,8 @@ if __name__ == '__main__':
     
     for scene in os.listdir(cfgs.data_dir):
         tqdm.write(f'process scene {scene}')
-        # for split in ['train', 'test', 'validation']:
         for split in ['train']:
+        # for split in ['train']:
             event_frame_dir = path.join(cfgs.data_dir, scene, split, f'event-frame')
             event_frame_viz_dir = path.join(cfgs.data_dir, scene, split, f'event-frame-viz')
             if path.exists(event_frame_dir):

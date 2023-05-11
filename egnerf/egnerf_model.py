@@ -21,13 +21,16 @@ from nerfstudio.model_components.losses import (
     orientation_loss,
     pred_normal_loss,
 )
+from torchtyping import TensorType
+from typing import Optional
+from nerfstudio.model_components.renderers import RGBRenderer
 
 @dataclass
 class EgNeRFModelConfig(NerfactoModelConfig):
     _target: Type = field(default_factory=lambda: EgNeRFModel)
-    rgb_loss_mult: float = 0.0
+    rgb_loss_mult: float = 1.0
     event_loss_mult: float = 1.0
-    event_threshold: float = 0.4
+    event_threshold: float = 0.1
     
 class EgNeRFModel(NerfactoModel):
     config: EgNeRFModelConfig
@@ -35,6 +38,7 @@ class EgNeRFModel(NerfactoModel):
         """Set the fields and modules."""
         super().populate_modules()
         self.event_loss = MSELoss()
+        self.renderer_rgb = HdrRGBRenderer(background_color=self.config.background_color)
 
     def get_outputs(self, ray_bundle: RayBundle, mode='train'):
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
@@ -44,14 +48,18 @@ class EgNeRFModel(NerfactoModel):
         ray_samples_list.append(ray_samples)
 
         rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
+        # hdr_rgb, rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
         depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
         accumulation = self.renderer_accumulation(weights=weights)
 
         if mode == 'train':
+            # hdr_rgb_prev, hdr_rgb = torch.chunk(rgb, 2, dim=0)
             rgb_prev, rgb = torch.chunk(rgb, 2, dim=0)
             depth_prev, depth = torch.chunk(depth, 2, dim=0)
             accumulation_prev, accumulation = torch.chunk(accumulation, 2, dim=0)
             outputs = {
+                # "hdr_rgb": rgb,
+                # "hdr_rgb_prev": rgb_prev,
                 "rgb": rgb,
                 "rgb_prev": rgb_prev,
                 "accumulation": accumulation,
@@ -95,11 +103,38 @@ class EgNeRFModel(NerfactoModel):
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         loss_dict = {}
         image = batch["image"].to(self.device)
-        event_frame = batch["event_frame"].to(self.device)
+        event_frame = batch["event_frame"].to(self.device) * self.config.event_threshold
+        color_mask = batch["color_mask"].to(self.device)
+        color_mask = torch.ones_like(color_mask)
+    
+        eps = 1e-6
+        diff = torch.log(outputs["rgb"]**2.2+eps) - torch.log(outputs["rgb_prev"]**2.2+eps)
+        # diff = outputs["rgb"] - outputs["rgb_prev"]
+        diff *= color_mask
+        event_frame *= color_mask
         
-        event = (outputs["rgb"] - outputs["rgb_prev"]) * self.config.event_threshold
-        loss_dict["rgb_loss"] = self.config.rgb_loss_mult * self.rgb_loss(image, outputs["rgb"])
-        loss_dict["event_loss"] = self.config.event_loss_mult * self.event_loss(event, event_frame)
+        event_mask = (event_frame.sum(dim=-1, keepdim=True)!=0).float()
+        event_loss = (event_frame**2 - diff**2)*event_mask / (event_mask.sum()*3 + eps)
+        loss_dict["event_loss"] = self.config.event_loss_mult * event_loss.mean()
+        # diff = outputs["rgb"] - outputs["rgb_prev"]
+        # event_loss = (diff - event_frame)**2
+        # event_loss[event_frame!=0] *= 10
+        # loss_dict["event_loss"] = self.config.event_loss_mult * (event_loss.mean())
+        
+        # edge_map = (event_frame!=0).float()
+        # edge_loss = (edge_map - outputs["accumulation"])**2
+        # # edge_loss = (edge_map - outputs["rgb"])**2
+        # edge_loss[edge_map!=0] *= 30
+        # loss_dict["edge_loss"] = self.config.event_loss_mult * (edge_loss.mean())
+        
+        # loss_dict["balance_loss"] = (outputs["rgb"].mean() - 0.5)**2 + (outputs["rgb_prev"].mean() - 0.5)**2
+        
+        self.config.interlevel_loss_mult = 0
+        self.config.distortion_loss_mult = 0
+        
+        # print((outputs["rgb"]==(159/255)).float().mean())
+        # raise ValueError('')
+        # loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"])
         
         if self.training:
             loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
@@ -148,3 +183,41 @@ class EgNeRFModel(NerfactoModel):
         for output_name, outputs_list in outputs_lists.items():
             outputs[output_name] = torch.cat(outputs_list).view(image_height, image_width, -1)  # type: ignore
         return outputs
+
+class HdrRGBRenderer(RGBRenderer):
+    """Standard volumetric rendering.
+
+    Args:
+        background_color: Background color as RGB. Uses random colors if None.
+    """
+
+    def __init__(self, background_color) -> None:
+        super().__init__(background_color)
+
+    def forward(
+        self,
+        rgb: TensorType["bs":..., "num_samples", 3],
+        weights: TensorType["bs":..., "num_samples", 1],
+        ray_indices: Optional[TensorType["num_samples"]] = None,
+        num_rays: Optional[int] = None,
+    ) -> TensorType["bs":..., 3]:
+        """Composite samples along ray and render color image
+
+        Args:
+            rgb: RGB for each sample
+            weights: Weights for each sample
+            ray_indices: Ray index for each sample, used when samples are packed.
+            num_rays: Number of rays, used when samples are packed.
+
+        Returns:
+            Outputs of rgb values.
+        """
+
+        if not self.training:
+            rgb = torch.nan_to_num(rgb)
+        rgb = self.combine_rgb(
+            rgb, weights, background_color=self.background_color, ray_indices=ray_indices, num_rays=num_rays
+        )
+        if not self.training:
+            torch.clamp_(rgb, min=0.0, max=1.0)
+        return  rgb
