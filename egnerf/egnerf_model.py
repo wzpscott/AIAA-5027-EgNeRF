@@ -11,6 +11,8 @@ from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.model_components.ray_samplers import PDFSampler
 from nerfstudio.model_components.renderers import DepthRenderer
 from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig
+from nerfstudio.models.vanilla_nerf import NeRFModel, NeRFModel
+from nerfstudio.models.instant_ngp import InstantNGPModelConfig, NGPModel
 from nerfstudio.utils.colormaps import apply_colormap
 from nerfstudio.viewer.server.viewer_elements import *
 from torch.nn import Parameter
@@ -30,7 +32,7 @@ class EgNeRFModelConfig(NerfactoModelConfig):
     _target: Type = field(default_factory=lambda: EgNeRFModel)
     rgb_loss_mult: float = 1.0
     event_loss_mult: float = 1.0
-    event_threshold: float = 0.1
+    event_threshold: float = 0.25
     
 class EgNeRFModel(NerfactoModel):
     config: EgNeRFModelConfig
@@ -48,7 +50,6 @@ class EgNeRFModel(NerfactoModel):
         ray_samples_list.append(ray_samples)
 
         rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
-        # hdr_rgb, rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
         depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
         accumulation = self.renderer_accumulation(weights=weights)
 
@@ -58,8 +59,6 @@ class EgNeRFModel(NerfactoModel):
             depth_prev, depth = torch.chunk(depth, 2, dim=0)
             accumulation_prev, accumulation = torch.chunk(accumulation, 2, dim=0)
             outputs = {
-                # "hdr_rgb": rgb,
-                # "hdr_rgb_prev": rgb_prev,
                 "rgb": rgb,
                 "rgb_prev": rgb_prev,
                 "accumulation": accumulation,
@@ -105,36 +104,21 @@ class EgNeRFModel(NerfactoModel):
         image = batch["image"].to(self.device)
         event_frame = batch["event_frame"].to(self.device) * self.config.event_threshold
         color_mask = batch["color_mask"].to(self.device)
-        color_mask = torch.ones_like(color_mask)
     
-        eps = 1e-6
+        eps = 1e-5
         diff = torch.log(outputs["rgb"]**2.2+eps) - torch.log(outputs["rgb_prev"]**2.2+eps)
         # diff = outputs["rgb"] - outputs["rgb_prev"]
-        diff *= color_mask
         event_frame *= color_mask
+        diff *= color_mask
         
-        event_mask = (event_frame.sum(dim=-1, keepdim=True)!=0).float()
-        event_loss = (event_frame**2 - diff**2)*event_mask / (event_mask.sum()*3 + eps)
-        loss_dict["event_loss"] = self.config.event_loss_mult * event_loss.mean()
-        # diff = outputs["rgb"] - outputs["rgb_prev"]
-        # event_loss = (diff - event_frame)**2
-        # event_loss[event_frame!=0] *= 10
-        # loss_dict["event_loss"] = self.config.event_loss_mult * (event_loss.mean())
+        event_loss = ((event_frame - diff)**2).mean()
+        loss_dict["event_loss"] = self.config.event_loss_mult * event_loss
         
-        # edge_map = (event_frame!=0).float()
-        # edge_loss = (edge_map - outputs["accumulation"])**2
-        # # edge_loss = (edge_map - outputs["rgb"])**2
-        # edge_loss[edge_map!=0] *= 30
-        # loss_dict["edge_loss"] = self.config.event_loss_mult * (edge_loss.mean())
+        bkgd_mask = (event_frame.sum(dim=-1, keepdim=True)==0).float()
+        bkgd_color = 159/255
+        loss_dict["bkgd_loss"] = ((outputs["rgb"]*bkgd_mask - bkgd_color)**2).mean()
         
-        # loss_dict["balance_loss"] = (outputs["rgb"].mean() - 0.5)**2 + (outputs["rgb_prev"].mean() - 0.5)**2
-        
-        self.config.interlevel_loss_mult = 0
-        self.config.distortion_loss_mult = 0
-        
-        # print((outputs["rgb"]==(159/255)).float().mean())
-        # raise ValueError('')
-        # loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"])
+        loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"]) * 0
         
         if self.training:
             loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(

@@ -22,11 +22,15 @@ from nerfstudio.data.dataparsers.base_dataparser import (
     DataParserConfig,
     DataparserOutputs
 )
+from nerfstudio.data.dataparsers.nerfosr_dataparser import (
+    NeRFOSR, 
+    NeRFOSRDataParserConfig
+)
 from nerfstudio.data.scene_box import SceneBox
 
 CONSOLE = Console(width=120)
 
-def _find_files(directory: str, exts: List[str]):
+def _find_files(directory: str, exts: List[str], limit=1000):
     """Find all files in a directory that have a certain file extension.
 
     Args:
@@ -43,7 +47,7 @@ def _find_files(directory: str, exts: List[str]):
             files_grabbed.extend(glob.glob(os.path.join(directory, ext)))
         if len(files_grabbed) > 0:
             files_grabbed = sorted(files_grabbed)
-        return files_grabbed
+        return files_grabbed[:limit]
     return []
 
 def _parse_osm_txt(filename: str):
@@ -194,7 +198,8 @@ class EgNeRF(DataParser):
         )
         
         # --- images ---
-        image_filenames = _find_files(f"{split_dir}/rgb", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"]) 
+        # image_filenames = _find_files(f"{split_dir}/rgb", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"]) 
+        image_filenames = _find_files(f"{split_dir}/blur-rgb-50", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"]) 
         
         # --- event frames ---
         if split == 'train':

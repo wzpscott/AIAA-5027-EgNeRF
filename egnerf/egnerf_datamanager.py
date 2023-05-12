@@ -67,23 +67,28 @@ class InputDataset(BaseInputDataset):
         else:
             data['event_frame'] = torch.zeros_like(image)
         data['color_mask'] = self.color_mask
+        data['img_idx'] = image_idx * torch.ones_like(image)
+        
+        if self.split == 'train':
+            event_mask = (data['event_frame'].sum(dim=-1)!=0).float()
+            neg_mask = (torch.rand_like(event_mask) < 0.003).float()
+            mask = ((event_mask + neg_mask) != 0).float()
+            mask = mask.unsqueeze(-1).repeat_interleave(3, dim=-1)
+            data['mask'] = mask  
             
-        if self.has_masks:
-            mask_filepath = self._dataparser_outputs.mask_filenames[image_idx]
-            data["mask"] = get_image_mask_tensor_from_path(filepath=mask_filepath, scale_factor=self.scale_factor)
-            assert (
-                data["mask"].shape[:2] == data["image"].shape[:2]
-            ), f"Mask and image have different shapes. Got {data['mask'].shape[:2]} and {data['image'].shape[:2]}"
         metadata = self.get_metadata(data)
         data.update(metadata)
         return data
 
     def get_event_frame(self, image_idx: int) -> Dict:
-        event_filename = self._dataparser_outputs.metadata['event_filenames'][image_idx]
-        event_frame = np.load(event_filename).astype("float32")
+        image_idx_prev = max(0, image_idx-50)
+        event_filenames = [self._dataparser_outputs.metadata['event_filenames'][i] for i in range(image_idx_prev, image_idx)]
+        event_frame = np.zeros([self.H, self.W, 1])
+        for event_filename in event_filenames:
+            event_frame += np.load(event_filename).astype("float32")
+            
         event_frame = torch.from_numpy(event_frame)
         event_frame = torch.repeat_interleave(event_frame, 3, dim=-1)
-        # event_frame *= self.color_mask
         return event_frame
 
 @dataclass
@@ -106,7 +111,6 @@ class EgNeRFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
     """
 
     config: EgNeRFDataManager
-    config: VanillaDataManagerConfig
     train_dataset: InputDataset
     eval_dataset: InputDataset
     train_dataparser_outputs: DataparserOutputs
@@ -157,6 +161,29 @@ class EgNeRFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
             device=self.device,
             num_workers=self.world_size * 4,
         )
+    
+    def setup_train(self):
+        """Sets up the data loaders for training"""
+        assert self.train_dataset is not None
+        CONSOLE.print("Setting up training dataset...")
+        self.train_image_dataloader = CacheDataloader(
+            self.train_dataset,
+            num_images_to_sample_from=self.config.train_num_images_to_sample_from,
+            num_times_to_repeat_images=self.config.train_num_times_to_repeat_images,
+            device=self.device,
+            num_workers=self.world_size * 4,
+            pin_memory=True,
+            collate_fn=self.config.collate_fn,
+        )
+        self.iter_train_image_dataloader = iter(self.train_image_dataloader)
+        self.train_pixel_sampler = self._get_pixel_sampler(self.train_dataset, self.config.train_num_rays_per_batch)
+        self.train_camera_optimizer = self.config.camera_optimizer.setup(
+            num_cameras=self.train_dataset.cameras.size, device=self.device
+        )
+        self.train_ray_generator = RayGenerator(
+            self.train_dataset.cameras.to(self.device),
+            self.train_camera_optimizer,
+        )
         
     def create_train_dataset(self) -> InputDataset:
         """Sets up the data loaders for training"""
@@ -177,16 +204,20 @@ class EgNeRFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
         """Returns the next batch of data from the train dataloader."""
         self.train_count += 1
         image_batch = next(self.iter_train_image_dataloader)
+        # image_batch['image_idx'] = [4, 5]
         assert self.train_pixel_sampler is not None
         batch = self.train_pixel_sampler.sample(image_batch)
         
         ray_indices = batch["indices"]
         ray_indices_prev = batch["indices"].clone()
-        ray_indices_prev[:, 0][ray_indices_prev[:, 0]==0] = 1
-        ray_indices_prev[:, 0] -= 1
+        # ray_indices_prev[:, 0][ray_indices_prev[:, 0]==0] = 1
+        # ray_indices_prev[:, 0] -= 1
+        ray_indices_prev[:, 0][ray_indices_prev[:, 0]<50] = 50
+        ray_indices_prev[:, 0] -= 50
         ray_indices_all = torch.cat([ray_indices_prev, ray_indices], dim=0)
         ray_bundle = self.train_ray_generator(ray_indices_all)
         batch["indices"] = ray_indices_all
+        
         return ray_bundle, batch
     
     def next_eval(self, step: int) -> Tuple[RayBundle, Dict]:
@@ -209,5 +240,6 @@ class EgNeRFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
             image_idx = int(camera_ray_bundle.camera_indices[0, 0, 0])
             return image_idx, camera_ray_bundle, batch
         raise ValueError("No more eval images")
+    
 
         

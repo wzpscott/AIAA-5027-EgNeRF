@@ -13,10 +13,10 @@ class Configs:
     A script to generate images with motion blur from a series of clear images by average consecutive images.
     '''
     
-    data_dir: str = './data/synthetic'
+    data_dir: str = 'egnerf/data/synthetic'
     '''Directory which contains input clear images'''
     
-    n_images: int = 20
+    n_images: int = 50
     '''Number of images to generate one blurred image'''
 
 def generate_blur_images(input_dir, output_dir, n_images):
@@ -29,7 +29,8 @@ def generate_blur_images(input_dir, output_dir, n_images):
         
         if (i+1) % n_images == 0:
             blur_img = np.stack(imgs, axis=0).mean(axis=0).astype(np.uint8)
-            imageio.imsave(path.join(output_dir, img_fname), blur_img)
+            for j in range(i+1-n_images, i+1):
+                imageio.imsave(path.join(output_dir, input_img_fnames[j]), blur_img)
             imgs = []
             # tqdm.write(f'Write blur image to {path.join(output_dir, img_fname)}')
             
