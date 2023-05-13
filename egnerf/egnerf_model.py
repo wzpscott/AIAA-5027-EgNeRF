@@ -30,8 +30,9 @@ from nerfstudio.model_components.renderers import RGBRenderer
 @dataclass
 class EgNeRFModelConfig(NerfactoModelConfig):
     _target: Type = field(default_factory=lambda: EgNeRFModel)
-    rgb_loss_mult: float = 1.0
+    rgb_loss_mult: float = 0.0
     event_loss_mult: float = 1.0
+    bkgd_loss_mult: float = 0.0
     event_threshold: float = 0.25
     
 class EgNeRFModel(NerfactoModel):
@@ -39,7 +40,7 @@ class EgNeRFModel(NerfactoModel):
     def populate_modules(self):
         """Set the fields and modules."""
         super().populate_modules()
-        self.event_loss = MSELoss()
+        self.mse_loss = lambda a, b : ((a-b)**2).mean()
         self.renderer_rgb = HdrRGBRenderer(background_color=self.config.background_color)
 
     def get_outputs(self, ray_bundle: RayBundle, mode='train'):
@@ -107,18 +108,16 @@ class EgNeRFModel(NerfactoModel):
     
         eps = 1e-5
         diff = torch.log(outputs["rgb"]**2.2+eps) - torch.log(outputs["rgb_prev"]**2.2+eps)
-        # diff = outputs["rgb"] - outputs["rgb_prev"]
         event_frame *= color_mask
         diff *= color_mask
         
-        event_loss = ((event_frame - diff)**2).mean()
-        loss_dict["event_loss"] = self.config.event_loss_mult * event_loss
+        loss_dict["event_loss"] = self.config.event_loss_mult * self.mse_loss(event_frame, diff)
         
         bkgd_mask = (event_frame.sum(dim=-1, keepdim=True)==0).float()
-        bkgd_color = 159/255
-        loss_dict["bkgd_loss"] = ((outputs["rgb"]*bkgd_mask - bkgd_color)**2).mean()
+        bkgd_color = (159/255) * torch.ones_like(outputs["rgb"]) * bkgd_mask
+        loss_dict["bkgd_loss"] = self.config.bkgd_loss_mult * self.mse_loss(outputs["rgb"]*bkgd_mask, bkgd_color)
         
-        loss_dict["rgb_loss"] = self.rgb_loss(image, outputs["rgb"]) * 0
+        loss_dict["rgb_loss"] = self.config.rgb_loss_mult * self.mse_loss(image, outputs["rgb"])
         
         if self.training:
             loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(

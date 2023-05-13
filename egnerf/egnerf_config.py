@@ -1,7 +1,7 @@
 """
 EgNeRF configuration file.
 """
-
+from pathlib import Path
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.configs.base_config import ViewerConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
@@ -17,7 +17,9 @@ from egnerf.egnerf_model import EgNeRFModelConfig
 egnerf_method = MethodSpecification(
     config=TrainerConfig(
         method_name="egnerf",
+        output_dir= Path("logs"),
         steps_per_eval_batch=500,
+        steps_per_eval_image=100,
         steps_per_save=2000,
         max_num_iterations=30000,
         mixed_precision=True,
@@ -44,9 +46,14 @@ egnerf_method = MethodSpecification(
                 "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=200000),
             },
         },
-        # viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
-        # vis="viewer",
         vis="tensorboard"
     ),
     description="Base config for EgNeRF",
 )
+
+
+# from nerfstudio.plugins.registry_dataparser import DataParserSpecification
+# from my_method.custom_dataparser import CustomDataparserConfig
+
+# MyDataparser = DataParserSpecification(config=CustomDataparserConfig)
+# from nerfstudio.plugins.types import 

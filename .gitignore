@@ -1,4 +1,5 @@
-*.egg-info
+EgNeRF.egg-info/
+logs/
 *.sh
 outputs/
 egnerf/data

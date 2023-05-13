@@ -198,13 +198,15 @@ class EgNeRF(DataParser):
         )
         
         # --- images ---
-        # image_filenames = _find_files(f"{split_dir}/rgb", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"]) 
-        image_filenames = _find_files(f"{split_dir}/blur-rgb-50", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"]) 
+        if split == 'train':
+            # image_filenames = _find_files(f"{split_dir}/rgb", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"]) 
+            image_filenames = _find_files(f"{split_dir}/blur-rgb-50", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"]) 
+        else:
+            image_filenames = _find_files(f"{split_dir}/rgb", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"]) 
         
         # --- event frames ---
         if split == 'train':
             event_filenames = _find_files(f"{split_dir}/event-frame", exts=["*.npy"])
-            # event_filenames = _find_files(f"{split_dir}/event-frame-viz", exts=["*.png"])
         else:
             event_filenames = None
         
