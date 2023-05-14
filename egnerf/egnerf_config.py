@@ -2,6 +2,7 @@
 EgNeRF configuration file.
 """
 from pathlib import Path
+
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.configs.base_config import ViewerConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
@@ -55,10 +56,3 @@ egnerf_method = MethodSpecification(
     ),
     description="Base config for EgNeRF",
 )
-
-
-# from nerfstudio.plugins.registry_dataparser import DataParserSpecification
-# from my_method.custom_dataparser import CustomDataparserConfig
-
-# MyDataparser = DataParserSpecification(config=CustomDataparserConfig)
-# from nerfstudio.plugins.types import 

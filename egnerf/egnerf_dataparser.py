@@ -109,9 +109,9 @@ class EgNeRFDataParserConfig(DataParserConfig):
 
     _target: Type = field(default_factory=lambda: EgNeRF)
     """target class to instantiate"""
-    data: Path = Path("./egnerf/data/synthetic")
-    """Directory specifying location of data."""
-    scene: str = "chair"
+    base_datadir: Path = Path("./egnerf/data/synthetic/")
+    """ Base data dir"""
+    data: Literal["chair", "drums", "ficus", "hotdog", "lego", "materials", "mic"] = "chair"
     """Which scene to load"""
     scene_scale: float = 1.0
     """How much to scale the region of interest by."""
@@ -142,8 +142,9 @@ class EgNeRF(DataParser):
     config: EgNeRFDataParserConfig
     
     def _generate_dataparser_outputs(self, split="train"):
-        data = self.config.data
-        scene = self.config.scene
+        data = self.config.base_datadir
+        # scene = self.config.scene
+        scene = self.config.data
         split = "validation" if split == "val" else split
         
         scene_dir = f"{data}/{scene}"

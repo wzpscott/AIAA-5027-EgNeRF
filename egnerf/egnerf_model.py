@@ -25,7 +25,8 @@ from nerfstudio.utils import colormaps
 @dataclass
 class EgNeRFModelConfig(NerfactoModelConfig):
     _target: Type = field(default_factory=lambda: EgNeRFModel)
-    tonemapper_mode: Literal['fixed-gamma', 'learned-gamma', 'learned-mlp'] = 'learned-gamma'
+    tonemapper_mode: Literal['fixed-gamma', 'learned-gamma', 'learned-mlp'] = 'learned-mlp'
+    use_original_event_nerf: bool = False
     tonemapper_gamma: float = 1.0
     tonemapper_n_layers: int = 3
     tonemapper_d_hidden: int = 128
@@ -123,19 +124,25 @@ class EgNeRFModel(NerfactoModel):
         image = batch["image"].to(self.device)
         event_frame = batch["event_frame"].to(self.device) * self.config.event_threshold
         color_mask = batch["color_mask"].to(self.device)
-    
-        eps = 1e-5
-        diff = torch.log(outputs["rgb_hdr"]**2.2+eps) - torch.log(outputs["rgb_hdr_prev"]**2.2+eps)
-        event_frame *= color_mask
-        diff *= color_mask
-        
-        loss_dict["event_loss"] = self.config.event_loss_mult * self.mse_loss(event_frame, diff)
-        
         bkgd_mask = (event_frame.sum(dim=-1, keepdim=True)==0).float()
-        bkgd_color = (159/255) * torch.ones_like(outputs["rgb_hdr"]) * bkgd_mask
-        loss_dict["bkgd_loss"] = self.config.bkgd_loss_mult * self.mse_loss(outputs["rgb_hdr"]*bkgd_mask, bkgd_color)
+        bkgd_color = (159/256) * torch.ones_like(outputs["rgb_hdr"]) * bkgd_mask
+        eps = 1e-5
         
-        loss_dict["rgb_loss"] = self.config.rgb_loss_mult * self.mse_loss(image, outputs["rgb"])
+        if self.config.use_original_event_nerf:
+            # Origin eventnerf implementation
+            diff = torch.log(outputs["rgb_hdr"]**2.2+eps) - torch.log(outputs["rgb_hdr_prev"]**2.2+eps)
+            event_frame *= color_mask
+            diff *= color_mask
+            loss_dict["event_loss"] = self.mse_loss(event_frame, diff)
+            loss_dict["bkgd_loss"] = self.mse_loss(outputs["rgb_hdr"]*bkgd_mask, bkgd_color)
+            loss_dict["rgb_loss"] = 0 * self.mse_loss(image, outputs["rgb"])
+        else:
+            diff = torch.log(outputs["rgb_hdr"]+eps) - torch.log(outputs["rgb_hdr_prev"]+eps)
+            event_frame *= color_mask
+            diff *= color_mask
+            loss_dict["event_loss"] = self.config.event_loss_mult * self.mse_loss(event_frame, diff)
+            loss_dict["bkgd_loss"] = self.config.bkgd_loss_mult * self.mse_loss(outputs["rgb_hdr"]*bkgd_mask, bkgd_color)
+            loss_dict["rgb_loss"] = self.config.rgb_loss_mult * self.mse_loss(image, outputs["rgb"])
         
         if self.training:
             loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
@@ -196,7 +203,7 @@ class EgNeRFModel(NerfactoModel):
         lpips_hdr = self.lpips(image, rgb_hdr)
 
         # all of these metrics will be logged as scalars
-        metrics_dict = {"psnr": float(psnr.item()), "ssim": float(ssim)}  # type: ignore
+        metrics_dict = {"psnr": float(psnr.item()), "ssim": float(ssim)}
         metrics_dict["lpips"] = float(lpips)
         
         metrics_dict["psnr_hdr"] = float(psnr_hdr)

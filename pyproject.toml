@@ -13,4 +13,4 @@ include = ["egnerf*"]
 egnerf = 'egnerf.egnerf_config:egnerf_method'
 
 [project.entry-points.'nerfstudio.dataparser_configs'] 
-egnerf-dataparser = 'my_method.my_config:MyDataparser'
+egnerf-dataparser = 'egnerf.egnerf_config:egnerf_dataparser'
