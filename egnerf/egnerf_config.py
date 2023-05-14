@@ -20,8 +20,9 @@ egnerf_method = MethodSpecification(
         output_dir= Path("logs"),
         steps_per_eval_batch=500,
         steps_per_eval_image=100,
-        steps_per_save=2000,
-        max_num_iterations=30000,
+        steps_per_eval_all_images=1000,
+        steps_per_save=3000,
+        max_num_iterations=3000,
         mixed_precision=True,
         pipeline=VanillaPipelineConfig(
             datamanager=EgNeRFDataManagerConfig(
@@ -42,6 +43,10 @@ egnerf_method = MethodSpecification(
                 "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=200000),
             },
             "fields": {
+                "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+                "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=200000),
+            },
+            "tonemapper": {
                 "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
                 "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=200000),
             },

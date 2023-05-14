@@ -71,7 +71,7 @@ class InputDataset(BaseInputDataset):
         
         if self.split == 'train':
             event_mask = (data['event_frame'].sum(dim=-1)!=0).float()
-            neg_mask = (torch.rand_like(event_mask) < 0.003).float()
+            neg_mask = (torch.rand_like(event_mask) < 0.1).float()
             mask = ((event_mask + neg_mask) != 0).float()
             mask = mask.unsqueeze(-1).repeat_interleave(3, dim=-1)
             data['mask'] = mask  
@@ -204,14 +204,11 @@ class EgNeRFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
         """Returns the next batch of data from the train dataloader."""
         self.train_count += 1
         image_batch = next(self.iter_train_image_dataloader)
-        # image_batch['image_idx'] = [4, 5]
         assert self.train_pixel_sampler is not None
         batch = self.train_pixel_sampler.sample(image_batch)
         
         ray_indices = batch["indices"]
         ray_indices_prev = batch["indices"].clone()
-        # ray_indices_prev[:, 0][ray_indices_prev[:, 0]==0] = 1
-        # ray_indices_prev[:, 0] -= 1
         ray_indices_prev[:, 0][ray_indices_prev[:, 0]<50] = 50
         ray_indices_prev[:, 0] -= 50
         ray_indices_all = torch.cat([ray_indices_prev, ray_indices], dim=0)

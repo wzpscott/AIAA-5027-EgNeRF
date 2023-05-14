@@ -1,21 +1,15 @@
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Type
+from typing_extensions import Literal
 
 import numpy as np
 import torch
+import torch.nn as nn
 from nerfstudio.cameras.rays import RayBundle, RaySamples
-from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.field_components.field_heads import FieldHeadNames
-from nerfstudio.field_components.spatial_distortions import SceneContraction
-from nerfstudio.model_components.ray_samplers import PDFSampler
-from nerfstudio.model_components.renderers import DepthRenderer
 from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig
-from nerfstudio.models.vanilla_nerf import NeRFModel, NeRFModel
-from nerfstudio.models.instant_ngp import InstantNGPModelConfig, NGPModel
-from nerfstudio.utils.colormaps import apply_colormap
 from nerfstudio.viewer.server.viewer_elements import *
-from torch.nn import Parameter
 from nerfstudio.model_components.losses import (
     MSELoss,
     distortion_loss,
@@ -26,13 +20,18 @@ from nerfstudio.model_components.losses import (
 from torchtyping import TensorType
 from typing import Optional
 from nerfstudio.model_components.renderers import RGBRenderer
+from nerfstudio.utils import colormaps
 
 @dataclass
 class EgNeRFModelConfig(NerfactoModelConfig):
     _target: Type = field(default_factory=lambda: EgNeRFModel)
-    rgb_loss_mult: float = 0.0
+    tonemapper_mode: Literal['fixed-gamma', 'learned-gamma', 'learned-mlp'] = 'learned-gamma'
+    tonemapper_gamma: float = 1.0
+    tonemapper_n_layers: int = 3
+    tonemapper_d_hidden: int = 128
+    rgb_loss_mult: float = 0.1
     event_loss_mult: float = 1.0
-    bkgd_loss_mult: float = 0.0
+    bkgd_loss_mult: float = 0.1
     event_threshold: float = 0.25
     
 class EgNeRFModel(NerfactoModel):
@@ -40,8 +39,22 @@ class EgNeRFModel(NerfactoModel):
     def populate_modules(self):
         """Set the fields and modules."""
         super().populate_modules()
-        self.mse_loss = lambda a, b : ((a-b)**2).mean()
-        self.renderer_rgb = HdrRGBRenderer(background_color=self.config.background_color)
+        self.tonemapper_mode=self.config.tonemapper_mode
+        self.gamma = self.config.tonemapper_gamma
+        self.d_hidden = self.config.tonemapper_d_hidden
+        self.n_layers = self.config.tonemapper_n_layers
+        self.tonemapper = Tonemapper(mode=self.tonemapper_mode, n_layers=self.n_layers, d_hidden=self.d_hidden, gamma=self.gamma)
+        
+        self.mse_loss = lambda a, b : ((a-b)**2).mean() # Origin MSELoss raise weird data type error
+        self.renderer_rgb = RGBRenderer(background_color=self.config.background_color)
+        
+    def get_param_groups(self):
+        param_groups = {}
+        param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
+        param_groups["tonemapper"] = list(self.tonemapper.parameters())
+        param_groups["fields"] = list(self.field.parameters())
+        
+        return param_groups
 
     def get_outputs(self, ray_bundle: RayBundle, mode='train'):
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
@@ -50,25 +63,30 @@ class EgNeRFModel(NerfactoModel):
         weights_list.append(weights)
         ray_samples_list.append(ray_samples)
 
-        rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
+        rgb_hdr = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
+        rgb = self.tonemapper(rgb_hdr)
         depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
         accumulation = self.renderer_accumulation(weights=weights)
 
         if mode == 'train':
-            # hdr_rgb_prev, hdr_rgb = torch.chunk(rgb, 2, dim=0)
+            rgb_hdr_prev, rgb_hdr = torch.chunk(rgb_hdr, 2, dim=0)
             rgb_prev, rgb = torch.chunk(rgb, 2, dim=0)
             depth_prev, depth = torch.chunk(depth, 2, dim=0)
             accumulation_prev, accumulation = torch.chunk(accumulation, 2, dim=0)
             outputs = {
+                "rgb_hdr": rgb_hdr,
+                "rgb_hdr_prev": rgb_hdr_prev,
                 "rgb": rgb,
                 "rgb_prev": rgb_prev,
                 "accumulation": accumulation,
                 "depth": depth,
             }
+            outputs['gamma'] = self.tonemapper.gamma
+            
         elif mode == 'eval':
             outputs = {
+                "rgb_hdr": rgb_hdr,
                 "rgb": rgb,
-                # "rgb_prev": rgb_prev,
                 "accumulation": accumulation,
                 "depth": depth,
             }
@@ -107,15 +125,15 @@ class EgNeRFModel(NerfactoModel):
         color_mask = batch["color_mask"].to(self.device)
     
         eps = 1e-5
-        diff = torch.log(outputs["rgb"]**2.2+eps) - torch.log(outputs["rgb_prev"]**2.2+eps)
+        diff = torch.log(outputs["rgb_hdr"]**2.2+eps) - torch.log(outputs["rgb_hdr_prev"]**2.2+eps)
         event_frame *= color_mask
         diff *= color_mask
         
         loss_dict["event_loss"] = self.config.event_loss_mult * self.mse_loss(event_frame, diff)
         
         bkgd_mask = (event_frame.sum(dim=-1, keepdim=True)==0).float()
-        bkgd_color = (159/255) * torch.ones_like(outputs["rgb"]) * bkgd_mask
-        loss_dict["bkgd_loss"] = self.config.bkgd_loss_mult * self.mse_loss(outputs["rgb"]*bkgd_mask, bkgd_color)
+        bkgd_color = (159/255) * torch.ones_like(outputs["rgb_hdr"]) * bkgd_mask
+        loss_dict["bkgd_loss"] = self.config.bkgd_loss_mult * self.mse_loss(outputs["rgb_hdr"]*bkgd_mask, bkgd_color)
         
         loss_dict["rgb_loss"] = self.config.rgb_loss_mult * self.mse_loss(image, outputs["rgb"])
         
@@ -140,6 +158,52 @@ class EgNeRFModel(NerfactoModel):
             ray_bundle = self.collider(ray_bundle)
 
         return self.get_outputs(ray_bundle, mode=mode)
+    
+    def get_metrics_dict(self, outputs, batch):
+        metrics_dict = {}
+        image = batch["image"].to(self.device)
+        metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
+        if self.training:
+            metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
+            metrics_dict["gamma"] = outputs["gamma"]
+        return metrics_dict
+    
+    def get_image_metrics_and_images(
+        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+    ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
+        
+        image = batch["image"].to(self.device)
+        rgb_hdr = outputs["rgb_hdr"]
+        rgb = outputs["rgb"]
+        acc = colormaps.apply_colormap(outputs["accumulation"] / outputs["accumulation"].max())
+        depth = colormaps.apply_depth_colormap(
+            outputs["depth"],
+            accumulation=outputs["accumulation"],
+        )
+        images_dict = {"0-GT": image, "1-RGB": rgb, "2-RGB-HDR": rgb_hdr, "3-ACC": acc, "4-DEPTH": depth}
+        
+        # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
+        image = torch.moveaxis(image, -1, 0)[None, ...]
+        rgb = torch.moveaxis(rgb, -1, 0)[None, ...]
+        rgb_hdr = torch.moveaxis(rgb_hdr, -1, 0)[None, ...]
+
+        psnr = self.psnr(image, rgb)
+        ssim = self.ssim(image, rgb)
+        lpips = self.lpips(image, rgb)
+        
+        psnr_hdr = self.psnr(image, rgb_hdr)
+        ssim_hdr = self.ssim(image, rgb_hdr)
+        lpips_hdr = self.lpips(image, rgb_hdr)
+
+        # all of these metrics will be logged as scalars
+        metrics_dict = {"psnr": float(psnr.item()), "ssim": float(ssim)}  # type: ignore
+        metrics_dict["lpips"] = float(lpips)
+        
+        metrics_dict["psnr_hdr"] = float(psnr_hdr)
+        metrics_dict["ssim_hdr"] = float(ssim_hdr)
+        metrics_dict["lpips_hdr"] = float(lpips_hdr)
+
+        return metrics_dict, images_dict
     
     @torch.no_grad()
     def get_outputs_for_camera_ray_bundle(self, camera_ray_bundle: RayBundle) -> Dict[str, torch.Tensor]:
@@ -167,40 +231,48 @@ class EgNeRFModel(NerfactoModel):
             outputs[output_name] = torch.cat(outputs_list).view(image_height, image_width, -1)  # type: ignore
         return outputs
 
-class HdrRGBRenderer(RGBRenderer):
-    """Standard volumetric rendering.
 
-    Args:
-        background_color: Background color as RGB. Uses random colors if None.
-    """
+class Tonemapper(nn.Module):
+    def __init__(self, mode, n_layers=None, d_hidden=None, gamma=None):
+        super().__init__()
+        # mode = mode[0]
+        assert mode in ['fixed-gamma', 'learned-gamma', 'learned-mlp'], f'No such mode: {mode}'
+        self.learnable = ('learned' in mode)
+        self.mode = mode
+        
+        if mode in ['fixed-gamma', 'learned-gamma']:
+            assert gamma is not None
+            requires_grad = ('learned' in mode)
+            self.gamma = nn.Parameter(torch.Tensor([gamma]), requires_grad=requires_grad)
+        else: # mlp tonemapper
+            assert (n_layers is not None) and (d_hidden is not None)
+            self.gamma = nn.Parameter(torch.Tensor([gamma])) # place holder
+            self.n_layers = n_layers
+            self.d_hidden = d_hidden
+            self.d_input = 3
+            self.d_output = 3
+            
+            self.mlp = nn.ModuleList()
+            for i_layer in range(n_layers):
+                if i_layer == 0:
+                    self.mlp.append(nn.Linear(self.d_input, self.d_hidden))
+                    self.mlp.append(nn.ReLU())
+                elif i_layer < n_layers-1:
+                    self.mlp.append(nn.Linear(self.d_hidden, self.d_hidden))
+                    self.mlp.append(nn.ReLU())
+                else: # last layer
+                    self.mlp.append(nn.Linear(self.d_hidden, self.d_output))
+                    self.mlp.append(nn.Sigmoid())
+            self.mlp = nn.Sequential(*self.mlp)
+                    
+    def forward(self, rgb_hdr):
+        if self.mode in ['fixed-gamma', 'learned-gamma']:
+            rgb = (rgb_hdr/(rgb_hdr+1)) ** self.gamma
+        else:
+            rgb = self.mlp(rgb_hdr)
+            
+        return rgb
+        
+        
+        
 
-    def __init__(self, background_color) -> None:
-        super().__init__(background_color)
-
-    def forward(
-        self,
-        rgb: TensorType["bs":..., "num_samples", 3],
-        weights: TensorType["bs":..., "num_samples", 1],
-        ray_indices: Optional[TensorType["num_samples"]] = None,
-        num_rays: Optional[int] = None,
-    ) -> TensorType["bs":..., 3]:
-        """Composite samples along ray and render color image
-
-        Args:
-            rgb: RGB for each sample
-            weights: Weights for each sample
-            ray_indices: Ray index for each sample, used when samples are packed.
-            num_rays: Number of rays, used when samples are packed.
-
-        Returns:
-            Outputs of rgb values.
-        """
-
-        if not self.training:
-            rgb = torch.nan_to_num(rgb)
-        rgb = self.combine_rgb(
-            rgb, weights, background_color=self.background_color, ray_indices=ray_indices, num_rays=num_rays
-        )
-        if not self.training:
-            torch.clamp_(rgb, min=0.0, max=1.0)
-        return  rgb
