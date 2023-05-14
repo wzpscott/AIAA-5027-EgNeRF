@@ -203,12 +203,21 @@ class EgNeRFModel(NerfactoModel):
         lpips_hdr = self.lpips(image, rgb_hdr)
 
         # all of these metrics will be logged as scalars
-        metrics_dict = {"psnr": float(psnr.item()), "ssim": float(ssim)}
-        metrics_dict["lpips"] = float(lpips)
+        metrics_dict = {"1.0-psnr": float(psnr.item()), "1.1-ssim": float(ssim)}
+        metrics_dict["1.2-lpips"] = float(lpips)
         
-        metrics_dict["psnr_hdr"] = float(psnr_hdr)
-        metrics_dict["ssim_hdr"] = float(ssim_hdr)
-        metrics_dict["lpips_hdr"] = float(lpips_hdr)
+        metrics_dict["2.0-psnr-hdr"] = float(psnr_hdr)
+        metrics_dict["2.1-ssim-hdr"] = float(ssim_hdr)
+        metrics_dict["2.2-lpips-hdr"] = float(lpips_hdr)
+        
+        if self.config.use_original_event_nerf or self.config.rgb_loss_mult != 0:
+            metrics_dict["0.0-report-psnr"] = float(psnr_hdr)
+            metrics_dict["0.1-report-ssim"] = float(ssim_hdr)
+            metrics_dict["0.2-report-lpips"] = float(lpips_hdr)
+        else:
+            metrics_dict["0.0-report-psnr"] = float(psnr)
+            metrics_dict["0.1-report-ssim"] = float(ssim)
+            metrics_dict["0.2-report-lpips"] = float(lpips)
 
         return metrics_dict, images_dict
     
